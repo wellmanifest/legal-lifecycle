@@ -30,6 +30,9 @@ location-dependent availability that product and SaaS catalogs can bind.
   from the request to create and publish this repository.
 - Adopted published `wellmanifest/new-project` v0.16.0 at
   `6800f0138bc9063eb2dacb0a8b797dedcafb7952`.
+- Created seed baseline `452845c7f11a81fde106512a47c70ea24e49285e`.
+- Added pack/request/obligation/receipt contracts, GBNF, conformance and
+  composition docs.
 
 ## Blockers
 

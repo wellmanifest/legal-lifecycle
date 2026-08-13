@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wellmanifest.dev/schemas/legal-lifecycle/v1",
+  "title": "Wellmanifest legal lifecycle contracts v1",
+  "description": "Closed contracts for versioned legal packs, jurisdiction and license rules, obligation state and secret-free receipts. Documents are machine constraints, not legal advice, and never grant execution or billing authority.",
+  "oneOf": [
+    {"$ref": "#/$defs/pack"},
+    {"$ref": "#/$defs/request"},
+    {"$ref": "#/$defs/obligation"},
+    {"$ref": "#/$defs/receipt"}
+  ],
+  "$defs": {
+    "identifier": {"type": "string", "minLength": 1, "maxLength": 96, "pattern": "^[a-z][a-z0-9._:-]*$"},
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "sha256Ref": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "accountRef": {"type": "string", "pattern": "^account://[a-z0-9.-]+/[a-z][a-z0-9._:-]*$", "maxLength": 240},
+    "productRef": {"type": "string", "pattern": "^product://[a-z0-9.-]+/[a-z][a-z0-9._:-]*/v[1-9][0-9]*$", "maxLength": 240},
+    "packRef": {"type": "string", "pattern": "^pack://[a-z0-9.-]+/[A-Za-z0-9._:/-]+/v[1-9][0-9]*$", "maxLength": 320},
+    "policyRef": {"type": "string", "pattern": "^policy://[a-z0-9.-]+/[A-Za-z0-9._:/-]+/v[1-9][0-9]*$", "maxLength": 320},
+    "licenseRef": {"type": "string", "pattern": "^license://[a-z0-9.-]+/[A-Za-z0-9._:/-]+/v[1-9][0-9]*$", "maxLength": 320},
+    "jurisdictionRef": {"type": "string", "pattern": "^jurisdiction://[a-z0-9.-]+/[A-Za-z0-9._:/-]+/v[1-9][0-9]*$", "maxLength": 320},
+    "intentRef": {"type": "string", "pattern": "^intent://[a-z0-9.-]+/[A-Za-z0-9._:/-]+$", "maxLength": 320},
+    "grantRef": {"type": "string", "pattern": "^grant://[a-z0-9.-]+/[A-Za-z0-9._:/-]+$", "maxLength": 320},
+    "evidenceRef": {"type": "string", "pattern": "^evidence://[a-z0-9.-]+/[A-Za-z0-9._:/-]+/r[1-9][0-9]*$", "maxLength": 320},
+    "country": {"type": "string", "pattern": "^[A-Z]{2}$"},
+    "language": {"type": "string", "pattern": "^[a-z]{2}$"},
+    "spdxId": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9.+-]+$"},
+    "availability": {"enum": ["offered", "restricted", "prohibited"]},
+    "jurisdiction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "country", "economicArea", "applicableLaw", "serviceAvailability", "productAvailability", "consumerWithdrawalDays", "requiresExplicitConsent", "ageOfConsent", "dataTransferAdequacy"],
+      "properties": {
+        "ref": {"$ref": "#/$defs/jurisdictionRef"},
+        "country": {"$ref": "#/$defs/country"},
+        "subdivision": {"type": "string", "pattern": "^[A-Z]{2}-[A-Z0-9]{1,3}$"},
+        "economicArea": {"enum": ["none", "eu", "eea", "uk", "other"]},
+        "applicableLaw": {"type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[A-Za-z0-9 .,:/-]+$"},
+        "serviceAvailability": {"$ref": "#/$defs/availability"},
+        "productAvailability": {"$ref": "#/$defs/availability"},
+        "consumerWithdrawalDays": {"type": "integer", "minimum": 0, "maximum": 30},
+        "requiresExplicitConsent": {"type": "boolean"},
+        "ageOfConsent": {"type": "integer", "minimum": 13, "maximum": 21},
+        "dataTransferAdequacy": {"enum": ["adequate", "scc-required", "prohibited", "not-applicable"]}
+      }
+    },
+    "license": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "grant", "copyleft", "attributionRequired", "sourceDisclosure", "warranty"],
+      "properties": {
+        "ref": {"$ref": "#/$defs/licenseRef"},
+        "spdxId": {"$ref": "#/$defs/spdxId"},
+        "grant": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {"enum": ["use", "modify", "distribute", "sublicense", "commercial", "private"]}
+        },
+        "copyleft": {"enum": ["none", "weak", "strong", "network"]},
+        "attributionRequired": {"type": "boolean"},
+        "sourceDisclosure": {"enum": ["none", "on-distribution", "network"]},
+        "warranty": {"enum": ["none", "limited", "as-declared"]}
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "kind", "language", "effectiveAt", "requiresAcceptance", "withdrawalDays"],
+      "properties": {
+        "ref": {"$ref": "#/$defs/policyRef"},
+        "kind": {"enum": ["terms", "privacy", "refund", "withdrawal", "cookie", "acceptable-use", "dpa"]},
+        "language": {"$ref": "#/$defs/language"},
+        "effectiveAt": {"type": "string", "format": "date"},
+        "requiresAcceptance": {"type": "boolean"},
+        "withdrawalDays": {"type": "integer", "minimum": 0, "maximum": 30}
+      }
+    },
+    "pack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["$schema", "schema", "packId", "version", "productRefs", "jurisdictions", "licenses", "policies", "defaultJurisdictionRef"],
+      "properties": {
+        "$schema": {"const": "https://wellmanifest.dev/schemas/legal-lifecycle/v1"},
+        "schema": {"const": "wellmanifest.legal-pack/v1"},
+        "packId": {"$ref": "#/$defs/identifier"},
+        "version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$"},
+        "productRefs": {"type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true, "items": {"$ref": "#/$defs/productRef"}},
+        "jurisdictions": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "#/$defs/jurisdiction"}},
+        "licenses": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"$ref": "#/$defs/license"}},
+        "policies": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"$ref": "#/$defs/policy"}},
+        "defaultJurisdictionRef": {"$ref": "#/$defs/jurisdictionRef"}
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["$schema", "schema", "requestId", "operation", "accountRef", "productRef", "packRef", "jurisdictionRef", "intentRef", "grantRef", "planHash"],
+      "properties": {
+        "$schema": {"const": "https://wellmanifest.dev/schemas/legal-lifecycle/v1"},
+        "schema": {"const": "wellmanifest.legal-lifecycle-request/v1"},
+        "requestId": {"$ref": "#/$defs/identifier"},
+        "operation": {"enum": ["inspect", "bind_jurisdiction", "accept_policy", "grant_license", "withdraw", "check_availability"]},
+        "accountRef": {"$ref": "#/$defs/accountRef"},
+        "productRef": {"$ref": "#/$defs/productRef"},
+        "packRef": {"$ref": "#/$defs/packRef"},
+        "jurisdictionRef": {"$ref": "#/$defs/jurisdictionRef"},
+        "policyRef": {"$ref": "#/$defs/policyRef"},
+        "licenseRef": {"$ref": "#/$defs/licenseRef"},
+        "intentRef": {"$ref": "#/$defs/intentRef"},
+        "grantRef": {"$ref": "#/$defs/grantRef"},
+        "planHash": {"$ref": "#/$defs/sha256"}
+      },
+      "allOf": [
+        {"if": {"properties": {"operation": {"const": "accept_policy"}}, "required": ["operation"]}, "then": {"required": ["policyRef"]}},
+        {"if": {"properties": {"operation": {"const": "grant_license"}}, "required": ["operation"]}, "then": {"required": ["licenseRef"]}}
+      ]
+    },
+    "obligation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["$schema", "schema", "accountRef", "productRef", "packRef", "boundJurisdictionRef", "state", "version", "updatedAt", "acceptedPolicies", "grantedLicenses"],
+      "properties": {
+        "$schema": {"const": "https://wellmanifest.dev/schemas/legal-lifecycle/v1"},
+        "schema": {"const": "wellmanifest.legal-obligation-state/v1"},
+        "accountRef": {"$ref": "#/$defs/accountRef"},
+        "productRef": {"$ref": "#/$defs/productRef"},
+        "packRef": {"$ref": "#/$defs/packRef"},
+        "boundJurisdictionRef": {"$ref": "#/$defs/jurisdictionRef"},
+        "state": {"enum": ["unbound", "bound", "accepted", "restricted", "withdrawn", "expired", "denied"]},
+        "version": {"type": "integer", "minimum": 1},
+        "updatedAt": {"type": "string", "format": "date-time"},
+        "acceptedPolicies": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"$ref": "#/$defs/policyRef"}},
+        "grantedLicenses": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"$ref": "#/$defs/licenseRef"}}
+      },
+      "allOf": [
+        {"if": {"properties": {"state": {"const": "accepted"}}, "required": ["state"]}, "then": {"properties": {"acceptedPolicies": {"minItems": 1}}, "required": ["acceptedPolicies"]}}
+      ]
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["$schema", "schema", "requestId", "accountRef", "productRef", "packRef", "jurisdictionRef", "inputHash", "planHash", "outcome", "startedAt", "completedAt", "evidenceRefs", "secretsRedacted", "personalDataStored"],
+      "properties": {
+        "$schema": {"const": "https://wellmanifest.dev/schemas/legal-lifecycle/v1"},
+        "schema": {"const": "wellmanifest.legal-lifecycle-receipt/v1"},
+        "requestId": {"$ref": "#/$defs/identifier"},
+        "accountRef": {"$ref": "#/$defs/accountRef"},
+        "productRef": {"$ref": "#/$defs/productRef"},
+        "packRef": {"$ref": "#/$defs/packRef"},
+        "jurisdictionRef": {"$ref": "#/$defs/jurisdictionRef"},
+        "inputHash": {"$ref": "#/$defs/sha256"},
+        "planHash": {"$ref": "#/$defs/sha256"},
+        "outcome": {"enum": ["denied", "accepted", "bound", "withdrawn", "unavailable", "failed"]},
+        "startedAt": {"type": "string", "format": "date-time"},
+        "completedAt": {"type": "string", "format": "date-time"},
+        "evidenceRefs": {"type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": {"$ref": "#/$defs/evidenceRef"}},
+        "secretsRedacted": {"const": true},
+        "personalDataStored": {"const": false}
+      }
+    }
+  }
+}
