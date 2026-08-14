@@ -12,12 +12,19 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+import lifecycle
+
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA_PATH = ROOT / "legal-lifecycle.schema.json"
 GRAMMAR_PATH = ROOT / "legal-lifecycle.v1.gbnf"
+LIFECYCLE_PATH = ROOT / "legal-lifecycle.lifecycle"
+LIFECYCLE_VALIDATOR_PATH = ROOT / "lifecycle.py"
 SCHEMA_DIGEST = "e735dd3919139f48aac85a6dfa08e8182627b0be8e315804a6c1408bbc08644e"
 GRAMMAR_DIGEST = "8b82c57b02e5754588a97f44699661dad3287ddd8b41df22dfa42122858e27ab"
+LIFECYCLE_SOURCE_REVISION = "4b5e131a670afb46ca87291479fed7c0fefcf370"
+LIFECYCLE_VALIDATOR_DIGEST = "9c3f3076b5b45408d3eefc34cd567b58821aa565d3fe3bf6339641111079ede0"
+LIFECYCLE_PROFILE_DIGEST = "0085858065d3bbda72ba49c494034c606e91047bfce9eef637e96ecf0ab93e26"
 SCHEMA_URI = "https://wellmanifest.dev/schemas/legal-lifecycle/v1"
 SENSITIVE = re.compile(
     r"(?:password|passwd|token|secret|cookie|api[-_]?key|card|cvv|private[-_]?key|"
@@ -25,6 +32,19 @@ SENSITIVE = re.compile(
     re.I,
 )
 SAFE_ASSERTIONS = {"secretsRedacted", "personalDataStored"}
+LIFECYCLE_TRANSITIONS = {
+    ("UNBOUND", "BOUND", "BIND_JURISDICTION"),
+    ("UNBOUND", "DENIED", "DENY"),
+    ("BOUND", "ACCEPTED", "ACCEPT_POLICY"),
+    ("BOUND", "RESTRICTED", "RESTRICT"),
+    ("BOUND", "EXPIRED", "EXPIRE"),
+    ("ACCEPTED", "ACCEPTED", "GRANT_LICENSE"),
+    ("ACCEPTED", "RESTRICTED", "RESTRICT"),
+    ("ACCEPTED", "WITHDRAWN", "WITHDRAW"),
+    ("ACCEPTED", "EXPIRED", "EXPIRE"),
+    ("RESTRICTED", "WITHDRAWN", "WITHDRAW"),
+    ("EXPIRED", "BOUND", "BIND_JURISDICTION"),
+}
 
 
 class ContractError(ValueError):
@@ -37,6 +57,38 @@ def canonical(value: Any) -> str:
 
 def digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def file_digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def lifecycle_name(value: str) -> str:
+    return value.upper().replace("-", "_")
+
+
+def validate_lifecycle_profile(schema: dict[str, Any]) -> None:
+    if file_digest(LIFECYCLE_VALIDATOR_PATH) != LIFECYCLE_VALIDATOR_DIGEST:
+        raise ContractError("pinned lifecycle validator digest mismatch")
+    if file_digest(LIFECYCLE_PATH) != LIFECYCLE_PROFILE_DIGEST:
+        raise ContractError("pinned lifecycle profile digest mismatch")
+    report = lifecycle.validate_path(LIFECYCLE_PATH, lifecycle.embedded_catalog())
+    if not report.valid or len(report.lifecycles) != 1:
+        raise ContractError("Lifecycle DSL profile is invalid")
+    model = report.lifecycles[0]
+    state_values = schema["$defs"]["obligation"]["properties"]["state"]["enum"]
+    expected_states = {lifecycle_name(str(value)) for value in state_values}
+    actual_transitions = {
+        (item.source, item.target, item.event) for item in model.transitions
+    }
+    if model.name != "legal-obligation" or set(model.states) != expected_states:
+        raise ContractError("Lifecycle DSL state graph mismatch")
+    if actual_transitions != LIFECYCLE_TRANSITIONS:
+        raise ContractError("Lifecycle DSL transition graph mismatch")
+    if model.summary()["initial_state"] != "UNBOUND":
+        raise ContractError("Lifecycle DSL initial state mismatch")
+    if model.summary()["terminal_states"] != ["DENIED", "WITHDRAWN"]:
+        raise ContractError("Lifecycle DSL terminal state mismatch")
 
 
 def exact(value: Any, required: set[str], optional: set[str] | None = None) -> dict[str, Any]:
@@ -492,6 +544,7 @@ def validate_receipt(c: Contracts, value: Any) -> None:
 def run_all() -> dict[str, Any]:
     c = Contracts()
     c.integrity()
+    validate_lifecycle_profile(c.schema)
     pack, request, obligation, receipt = pack_example(), request_example(), obligation_example(), receipt_example()
     validate_pack(c, pack)
     validate_request(c, request)
