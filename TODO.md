@@ -11,3 +11,5 @@
 - [x] Define and validate the standalone v1 legal lifecycle contract.
 - [x] Obtain trusted exact-head review and merge through the authorized pull
   request lifecycle. Merged as `0ff51793c7d2a405fab6ebbf0c41de31675b683b`.
+- [ ] [ticket-004](project/ticket-004/README.md) — upgrade the adopter to the
+  published new-project 0.20.32 contract and verify host source links.
