@@ -22,9 +22,9 @@ LIFECYCLE_PATH = ROOT / "legal-lifecycle.lifecycle"
 LIFECYCLE_VALIDATOR_PATH = ROOT / "lifecycle.py"
 SCHEMA_DIGEST = "e735dd3919139f48aac85a6dfa08e8182627b0be8e315804a6c1408bbc08644e"
 GRAMMAR_DIGEST = "8b82c57b02e5754588a97f44699661dad3287ddd8b41df22dfa42122858e27ab"
-LIFECYCLE_SOURCE_REVISION = "4b5e131a670afb46ca87291479fed7c0fefcf370"
-LIFECYCLE_VALIDATOR_DIGEST = "9c3f3076b5b45408d3eefc34cd567b58821aa565d3fe3bf6339641111079ede0"
-LIFECYCLE_PROFILE_DIGEST = "0085858065d3bbda72ba49c494034c606e91047bfce9eef637e96ecf0ab93e26"
+LIFECYCLE_SOURCE_REVISION = "1ea2a90bd5b90a768ad2b36a9c1c330523bc80b4"
+LIFECYCLE_VALIDATOR_DIGEST = "7f7f1c45b7611e186cc640ada69cf2849d16841564c4028b9fc06dd0a05c2b3a"
+LIFECYCLE_PROFILE_DIGEST = "5ff70b525410aaad64a9be644debd04ebcbb584f2ad650c33d9efcbe12554e0b"
 SCHEMA_URI = "https://wellmanifest.dev/schemas/legal-lifecycle/v1"
 SENSITIVE = re.compile(
     r"(?:password|passwd|token|secret|cookie|api[-_]?key|card|cvv|private[-_]?key|"
@@ -75,6 +75,8 @@ def validate_lifecycle_profile(schema: dict[str, Any]) -> None:
     report = lifecycle.validate_path(LIFECYCLE_PATH, lifecycle.embedded_catalog())
     if not report.valid or len(report.lifecycles) != 1:
         raise ContractError("Lifecycle DSL profile is invalid")
+    if lifecycle.audit_path(LIFECYCLE_PATH)["finding_count"] != 0:
+        raise ContractError("Lifecycle DSL profile has compaction findings")
     model = report.lifecycles[0]
     state_values = schema["$defs"]["obligation"]["properties"]["state"]["enum"]
     expected_states = {lifecycle_name(str(value)) for value in state_values}
