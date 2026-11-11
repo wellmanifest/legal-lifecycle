@@ -36,6 +36,7 @@ from legal_primitives import (  # noqa: E402
     enum_str,
     exact,
     file_digest,
+    has_symlink_ancestor,
     iso_date_value,
     read_regular_utf8,
     reject_sensitive,
@@ -139,8 +140,10 @@ def validate_jurisdiction(c: Contracts, value: Any) -> str:
         or not value["subdivision"].startswith(value["country"] + "-")
     ):
         raise ContractError("invalid subdivision")
-    if not isinstance(value["applicableLaw"], str) or not APPLICABLE_LAW_RE.fullmatch(
-        value["applicableLaw"]
+    if (
+        not isinstance(value["applicableLaw"], str)
+        or not value["applicableLaw"].strip()
+        or not APPLICABLE_LAW_RE.fullmatch(value["applicableLaw"])
     ):
         raise ContractError("invalid applicableLaw")
     area = enum_str(value["economicArea"], _ECONOMIC_AREAS, "invalid economic area")
@@ -441,6 +444,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.all:
             print(json.dumps(run_all(), indent=2, sort_keys=True, allow_nan=False))
         elif args.file:
+            if has_symlink_ancestor(args.file, include_self=True):
+                raise ContractError("symlink JSON input is forbidden")
             target = Path(os.path.abspath(os.fspath(args.file)))
             validate_document(strict_loads(read_regular_utf8(target)))
             print(f"PASS: {args.file}")
