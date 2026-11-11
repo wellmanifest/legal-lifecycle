@@ -1,9 +1,9 @@
 # Ticket 004: Adopt wellmanifest/new-project v0.20.32 and host source links
 
 - **ID**: ticket-004
-- **Owner**: unresolved:human
-- **Status**: IN_PROGRESS
-- **Workflow state**: EDIT
+- **Owner**: tom
+- **Status**: DONE
+- **Workflow state**: PUBLICATION
 - **Created**: 2026-09-15
 
 ## Goal and scope

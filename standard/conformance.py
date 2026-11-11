@@ -4,295 +4,76 @@
 from __future__ import annotations
 
 import argparse
-import copy
-import hashlib
 import json
 import re
-from datetime import date, datetime
+import sys
 from pathlib import Path
 from typing import Any
 
-import lifecycle
-
-
 ROOT = Path(__file__).resolve().parent
-SCHEMA_PATH = ROOT / "legal-lifecycle.schema.json"
-GRAMMAR_PATH = ROOT / "legal-lifecycle.v1.gbnf"
-LIFECYCLE_PATH = ROOT / "legal-lifecycle.lifecycle"
-LIFECYCLE_VALIDATOR_PATH = ROOT / "lifecycle.py"
-SCHEMA_DIGEST = "e735dd3919139f48aac85a6dfa08e8182627b0be8e315804a6c1408bbc08644e"
-GRAMMAR_DIGEST = "8b82c57b02e5754588a97f44699661dad3287ddd8b41df22dfa42122858e27ab"
-LIFECYCLE_SOURCE_REVISION = "1ea2a90bd5b90a768ad2b36a9c1c330523bc80b4"
-LIFECYCLE_VALIDATOR_DIGEST = "7f7f1c45b7611e186cc640ada69cf2849d16841564c4028b9fc06dd0a05c2b3a"
-LIFECYCLE_PROFILE_DIGEST = "5ff70b525410aaad64a9be644debd04ebcbb584f2ad650c33d9efcbe12554e0b"
-SCHEMA_URI = "https://wellmanifest.dev/schemas/legal-lifecycle/v1"
-SENSITIVE = re.compile(
-    r"(?:password|passwd|token|secret|cookie|api[-_]?key|card|cvv|private[-_]?key|"
-    r"email|address|phone|ssn|passport|legal[-_]?advice|court[-_]?filing|attorney)",
-    re.I,
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import legal_fixtures as _fx  # noqa: E402
+from legal_primitives import (  # noqa: E402
+    ALLOWED_GRANTS,
+    APPLICABLE_LAW_RE,
+    GRAMMAR_DIGEST,
+    LIFECYCLE_PROFILE_DIGEST,
+    LIFECYCLE_SOURCE_REVISION,
+    LIFECYCLE_TRANSITIONS,
+    LIFECYCLE_VALIDATOR_DIGESTS,
+    SCHEMA_DIGEST,
+    SCHEMA_URI,
+    SEMVER_RE,
+    ContractError,
+    Contracts,
+    bounded_int,
+    bounded_list,
+    canonical,
+    digest,
+    exact,
+    file_digest,
+    iso_date_value,
+    reject_sensitive,
+    strict_bool,
+    strict_loads,
+    time_value,
+    unique_list,
+    validate_lifecycle_profile,
 )
-SAFE_ASSERTIONS = {"secretsRedacted", "personalDataStored"}
-LIFECYCLE_TRANSITIONS = {
-    ("UNBOUND", "BOUND", "BIND_JURISDICTION"),
-    ("UNBOUND", "DENIED", "DENY"),
-    ("BOUND", "ACCEPTED", "ACCEPT_POLICY"),
-    ("BOUND", "RESTRICTED", "RESTRICT"),
-    ("BOUND", "EXPIRED", "EXPIRE"),
-    ("ACCEPTED", "ACCEPTED", "GRANT_LICENSE"),
-    ("ACCEPTED", "RESTRICTED", "RESTRICT"),
-    ("ACCEPTED", "WITHDRAWN", "WITHDRAW"),
-    ("ACCEPTED", "EXPIRED", "EXPIRE"),
-    ("RESTRICTED", "WITHDRAWN", "WITHDRAW"),
-    ("EXPIRED", "BOUND", "BIND_JURISDICTION"),
-}
 
+pack_example, request_example = _fx.pack_example, _fx.request_example
+obligation_example, receipt_example = _fx.obligation_example, _fx.receipt_example
 
-class ContractError(ValueError):
-    """A bounded error that never repeats untrusted legal or personal data."""
-
-
-def canonical(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def digest(value: str) -> str:
-    return hashlib.sha256(value.encode()).hexdigest()
-
-
-def file_digest(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def lifecycle_name(value: str) -> str:
-    return value.upper().replace("-", "_")
-
-
-def validate_lifecycle_profile(schema: dict[str, Any]) -> None:
-    if file_digest(LIFECYCLE_VALIDATOR_PATH) != LIFECYCLE_VALIDATOR_DIGEST:
-        raise ContractError("pinned lifecycle validator digest mismatch")
-    if file_digest(LIFECYCLE_PATH) != LIFECYCLE_PROFILE_DIGEST:
-        raise ContractError("pinned lifecycle profile digest mismatch")
-    report = lifecycle.validate_path(LIFECYCLE_PATH, lifecycle.embedded_catalog())
-    if not report.valid or len(report.lifecycles) != 1:
-        raise ContractError("Lifecycle DSL profile is invalid")
-    if lifecycle.audit_path(LIFECYCLE_PATH)["finding_count"] != 0:
-        raise ContractError("Lifecycle DSL profile has compaction findings")
-    model = report.lifecycles[0]
-    state_values = schema["$defs"]["obligation"]["properties"]["state"]["enum"]
-    expected_states = {lifecycle_name(str(value)) for value in state_values}
-    actual_transitions = {
-        (item.source, item.target, item.event) for item in model.transitions
-    }
-    if model.name != "legal-obligation" or set(model.states) != expected_states:
-        raise ContractError("Lifecycle DSL state graph mismatch")
-    if actual_transitions != LIFECYCLE_TRANSITIONS:
-        raise ContractError("Lifecycle DSL transition graph mismatch")
-    if model.summary()["initial_state"] != "UNBOUND":
-        raise ContractError("Lifecycle DSL initial state mismatch")
-    if model.summary()["terminal_states"] != ["DENIED", "WITHDRAWN"]:
-        raise ContractError("Lifecycle DSL terminal state mismatch")
-
-
-def exact(value: Any, required: set[str], optional: set[str] | None = None) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ContractError("expected object")
-    optional = optional or set()
-    if set(value) - required - optional:
-        raise ContractError("undeclared field")
-    if required - set(value):
-        raise ContractError("missing field")
-    return value
-
-
-def time_value(value: Any) -> datetime:
-    if not isinstance(value, str) or len(value) > 40:
-        raise ContractError("invalid date-time")
-    try:
-        result = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as error:
-        raise ContractError("invalid date-time") from error
-    if result.tzinfo is None:
-        raise ContractError("timezone required")
-    return result
-
-
-def reject_sensitive(value: Any) -> None:
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if SENSITIVE.search(key) and key not in SAFE_ASSERTIONS:
-                raise ContractError("sensitive data channel")
-            reject_sensitive(child)
-    elif isinstance(value, list):
-        for child in value:
-            reject_sensitive(child)
-
-
-class Contracts:
-    def __init__(self) -> None:
-        self.schema = json.loads(SCHEMA_PATH.read_text("utf-8"))
-        self.grammar = GRAMMAR_PATH.read_text("utf-8")
-        defs = self.schema.get("$defs", {})
-        names = (
-            "identifier",
-            "sha256",
-            "accountRef",
-            "productRef",
-            "packRef",
-            "policyRef",
-            "licenseRef",
-            "jurisdictionRef",
-            "intentRef",
-            "grantRef",
-            "evidenceRef",
-            "country",
-            "language",
-            "spdxId",
-        )
-        self.patterns = {name: re.compile(defs[name]["pattern"]) for name in names}
-
-    def ref(self, name: str, value: Any) -> str:
-        if not isinstance(value, str) or self.patterns[name].fullmatch(value) is None:
-            raise ContractError(f"invalid {name}")
-        return value
-
-    def integrity(self) -> None:
-        if self.schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema" or self.schema.get("$id") != SCHEMA_URI:
-            raise ContractError("schema identity mismatch")
-        if digest(canonical(self.schema)) != SCHEMA_DIGEST or digest(self.grammar) != GRAMMAR_DIGEST:
-            raise ContractError("contract digest mismatch")
-        if {x.get("$ref") for x in self.schema.get("oneOf", [])} != {
-            "#/$defs/pack",
-            "#/$defs/request",
-            "#/$defs/obligation",
-            "#/$defs/receipt",
-        }:
-            raise ContractError("document variants incomplete")
-        for fragment in ("root ::= request", "legal prose", "jurisdiction-ref ::=", "pack-ref ::=", "sha256 ::="):
-            if fragment not in self.grammar:
-                raise ContractError("grammar incomplete")
-        self._closed(self.schema)
-
-    def _closed(self, value: Any) -> None:
-        if isinstance(value, dict):
-            if value.get("type") == "object" and value.get("additionalProperties") is not False:
-                raise ContractError("open object schema")
-            for child in value.values():
-                self._closed(child)
-        elif isinstance(value, list):
-            for child in value:
-                self._closed(child)
-
-
-def pack_example() -> dict[str, Any]:
-    eu = "jurisdiction://example.test/eu-pl/v1"
-    return {
-        "$schema": SCHEMA_URI,
-        "schema": "wellmanifest.legal-pack/v1",
-        "packId": "pack-saas-2026",
-        "version": "1.0.0",
-        "productRefs": ["product://example.test/subactor/v1"],
-        "jurisdictions": [
-            {
-                "ref": eu,
-                "country": "PL",
-                "subdivision": "PL-14",
-                "economicArea": "eu",
-                "applicableLaw": "Poland / EU consumer law",
-                "serviceAvailability": "offered",
-                "productAvailability": "offered",
-                "consumerWithdrawalDays": 14,
-                "requiresExplicitConsent": True,
-                "ageOfConsent": 16,
-                "dataTransferAdequacy": "adequate",
-            },
-            {
-                "ref": "jurisdiction://example.test/us-ca/v1",
-                "country": "US",
-                "subdivision": "US-CA",
-                "economicArea": "none",
-                "applicableLaw": "California",
-                "serviceAvailability": "restricted",
-                "productAvailability": "restricted",
-                "consumerWithdrawalDays": 0,
-                "requiresExplicitConsent": True,
-                "ageOfConsent": 13,
-                "dataTransferAdequacy": "scc-required",
-            },
-        ],
-        "licenses": [
-            {
-                "ref": "license://example.test/proprietary/v1",
-                "grant": ["use", "private"],
-                "copyleft": "none",
-                "attributionRequired": False,
-                "sourceDisclosure": "none",
-                "warranty": "none",
-            }
-        ],
-        "policies": [
-            {
-                "ref": "policy://example.test/saas/terms/v1",
-                "kind": "terms",
-                "language": "en",
-                "effectiveAt": "2026-08-13",
-                "requiresAcceptance": True,
-                "withdrawalDays": 14,
-            }
-        ],
-        "defaultJurisdictionRef": eu,
-    }
-
-
-def request_example() -> dict[str, Any]:
-    return {
-        "$schema": SCHEMA_URI,
-        "schema": "wellmanifest.legal-lifecycle-request/v1",
-        "requestId": "request-001",
-        "operation": "bind_jurisdiction",
-        "accountRef": "account://example.test/account-001",
-        "productRef": "product://example.test/subactor/v1",
-        "packRef": "pack://example.test/saas/legal/v1",
-        "jurisdictionRef": "jurisdiction://example.test/eu-pl/v1",
-        "intentRef": "intent://example.test/legal/request-001",
-        "grantRef": "grant://example.test/legal/request-001/g1",
-        "planHash": "a" * 64,
-    }
-
-
-def obligation_example() -> dict[str, Any]:
-    return {
-        "$schema": SCHEMA_URI,
-        "schema": "wellmanifest.legal-obligation-state/v1",
-        "accountRef": "account://example.test/account-001",
-        "productRef": "product://example.test/subactor/v1",
-        "packRef": "pack://example.test/saas/legal/v1",
-        "boundJurisdictionRef": "jurisdiction://example.test/eu-pl/v1",
-        "state": "accepted",
-        "version": 3,
-        "updatedAt": "2026-08-13T12:00:00Z",
-        "acceptedPolicies": ["policy://example.test/saas/terms/v1"],
-        "grantedLicenses": ["license://example.test/proprietary/v1"],
-    }
-
-
-def receipt_example() -> dict[str, Any]:
-    return {
-        "$schema": SCHEMA_URI,
-        "schema": "wellmanifest.legal-lifecycle-receipt/v1",
-        "requestId": "request-001",
-        "accountRef": "account://example.test/account-001",
-        "productRef": "product://example.test/subactor/v1",
-        "packRef": "pack://example.test/saas/legal/v1",
-        "jurisdictionRef": "jurisdiction://example.test/eu-pl/v1",
-        "inputHash": "c" * 64,
-        "planHash": "a" * 64,
-        "outcome": "bound",
-        "startedAt": "2026-08-13T11:50:00Z",
-        "completedAt": "2026-08-13T12:00:00Z",
-        "evidenceRefs": ["evidence://example.test/legal/bind-001/r1"],
-        "secretsRedacted": True,
-        "personalDataStored": False,
-    }
+__all__ = [
+    "ContractError",
+    "Contracts",
+    "GRAMMAR_DIGEST",
+    "LIFECYCLE_PROFILE_DIGEST",
+    "LIFECYCLE_SOURCE_REVISION",
+    "LIFECYCLE_TRANSITIONS",
+    "LIFECYCLE_VALIDATOR_DIGESTS",
+    "SCHEMA_DIGEST",
+    "SCHEMA_URI",
+    "canonical",
+    "digest",
+    "file_digest",
+    "main",
+    "obligation_example",
+    "pack_example",
+    "receipt_example",
+    "request_example",
+    "run_all",
+    "strict_loads",
+    "validate_document",
+    "validate_jurisdiction",
+    "validate_lifecycle_profile",
+    "validate_obligation",
+    "validate_pack",
+    "validate_receipt",
+    "validate_request",
+]
 
 
 def validate_jurisdiction(c: Contracts, value: Any) -> str:
@@ -320,22 +101,30 @@ def validate_jurisdiction(c: Contracts, value: Any) -> str:
         or not value["subdivision"].startswith(value["country"] + "-")
     ):
         raise ContractError("invalid subdivision")
+    if not isinstance(value["applicableLaw"], str) or not APPLICABLE_LAW_RE.fullmatch(
+        value["applicableLaw"]
+    ):
+        raise ContractError("invalid applicableLaw")
     if value["economicArea"] not in {"none", "eu", "eea", "uk", "other"}:
         raise ContractError("invalid economic area")
     if value["serviceAvailability"] not in {"offered", "restricted", "prohibited"}:
         raise ContractError("invalid service availability")
     if value["productAvailability"] not in {"offered", "restricted", "prohibited"}:
         raise ContractError("invalid product availability")
-    if not isinstance(value["consumerWithdrawalDays"], int) or not 0 <= value["consumerWithdrawalDays"] <= 30:
-        raise ContractError("invalid withdrawal days")
+    withdrawal = bounded_int(value["consumerWithdrawalDays"], 0, 30, "invalid withdrawal days")
+    explicit = strict_bool(value["requiresExplicitConsent"], "invalid explicit consent flag")
     if value["economicArea"] in {"eu", "eea"}:
-        if value["consumerWithdrawalDays"] < 14:
+        if withdrawal < 14:
             raise ContractError("eu withdrawal window too short")
-        if value["requiresExplicitConsent"] is not True:
+        if explicit is not True:
             raise ContractError("eu consent must be explicit")
-    if not isinstance(value["ageOfConsent"], int) or not 13 <= value["ageOfConsent"] <= 21:
-        raise ContractError("invalid age of consent")
-    if value["dataTransferAdequacy"] not in {"adequate", "scc-required", "prohibited", "not-applicable"}:
+    bounded_int(value["ageOfConsent"], 13, 21, "invalid age of consent")
+    if value["dataTransferAdequacy"] not in {
+        "adequate",
+        "scc-required",
+        "prohibited",
+        "not-applicable",
+    }:
         raise ContractError("invalid transfer adequacy")
     return ref
 
@@ -359,14 +148,16 @@ def validate_pack(c: Contracts, value: Any) -> None:
     if value["$schema"] != SCHEMA_URI or value["schema"] != "wellmanifest.legal-pack/v1":
         raise ContractError("unsupported pack")
     c.ref("identifier", value["packId"])
-    if not value["productRefs"]:
-        raise ContractError("pack without products")
-    for product in value["productRefs"]:
+    if not isinstance(value["version"], str) or SEMVER_RE.fullmatch(value["version"]) is None:
+        raise ContractError("invalid pack version")
+    for product in unique_list(value["productRefs"], "invalid productRefs", minimum=1, maximum=32):
         c.ref("productRef", product)
     jurisdictions: set[str] = set()
     countries: set[str] = set()
     offered = False
-    for item in value["jurisdictions"]:
+    for item in bounded_list(
+        value["jurisdictions"], "invalid jurisdictions", minimum=1, maximum=64
+    ):
         ref = validate_jurisdiction(c, item)
         if ref in jurisdictions:
             raise ContractError("duplicate jurisdiction")
@@ -381,44 +172,62 @@ def validate_pack(c: Contracts, value: Any) -> None:
     if default not in jurisdictions:
         raise ContractError("default jurisdiction missing")
     default_item = next(item for item in value["jurisdictions"] if item["ref"] == default)
-    if default_item["productAvailability"] == "prohibited" or default_item["serviceAvailability"] == "prohibited":
+    if (
+        default_item["productAvailability"] == "prohibited"
+        or default_item["serviceAvailability"] == "prohibited"
+    ):
         raise ContractError("default jurisdiction prohibited")
     if not offered:
         raise ContractError("pack offers no jurisdiction")
     licenses: set[str] = set()
-    for item in value["licenses"]:
-        item = exact(item, {"ref", "grant", "copyleft", "attributionRequired", "sourceDisclosure", "warranty"}, {"spdxId"})
+    for item in bounded_list(value["licenses"], "invalid licenses", minimum=1, maximum=16):
+        item = exact(
+            item,
+            {"ref", "grant", "copyleft", "attributionRequired", "sourceDisclosure", "warranty"},
+            {"spdxId"},
+        )
         ref = c.ref("licenseRef", item["ref"])
         if ref in licenses:
             raise ContractError("duplicate license")
         licenses.add(ref)
         if "spdxId" in item:
             c.ref("spdxId", item["spdxId"])
-        grants = item["grant"]
-        if not isinstance(grants, list) or not grants or len(grants) != len(set(grants)):
+        grants = unique_list(item["grant"], "invalid license grant", minimum=1, maximum=8)
+        if any(g not in ALLOWED_GRANTS for g in grants):
             raise ContractError("invalid license grant")
+        strict_bool(item["attributionRequired"], "invalid attributionRequired")
         if item["copyleft"] not in {"none", "weak", "strong", "network"}:
             raise ContractError("invalid copyleft")
         if item["sourceDisclosure"] not in {"none", "on-distribution", "network"}:
             raise ContractError("invalid source disclosure")
+        if item["warranty"] not in {"none", "limited", "as-declared"}:
+            raise ContractError("invalid warranty")
         if item["copyleft"] in {"strong", "network"} and item["sourceDisclosure"] == "none":
             raise ContractError("copyleft without disclosure")
     policies: set[str] = set()
-    for item in value["policies"]:
-        item = exact(item, {"ref", "kind", "language", "effectiveAt", "requiresAcceptance", "withdrawalDays"})
+    for item in bounded_list(value["policies"], "invalid policies", minimum=1, maximum=16):
+        item = exact(
+            item,
+            {"ref", "kind", "language", "effectiveAt", "requiresAcceptance", "withdrawalDays"},
+        )
         ref = c.ref("policyRef", item["ref"])
         if ref in policies:
             raise ContractError("duplicate policy")
         policies.add(ref)
         c.ref("language", item["language"])
-        if item["kind"] not in {"terms", "privacy", "refund", "withdrawal", "cookie", "acceptable-use", "dpa"}:
+        if item["kind"] not in {
+            "terms",
+            "privacy",
+            "refund",
+            "withdrawal",
+            "cookie",
+            "acceptable-use",
+            "dpa",
+        }:
             raise ContractError("invalid policy kind")
-        try:
-            date.fromisoformat(item["effectiveAt"])
-        except (TypeError, ValueError) as error:
-            raise ContractError("invalid policy date") from error
-        if not isinstance(item["withdrawalDays"], int) or not 0 <= item["withdrawalDays"] <= 30:
-            raise ContractError("invalid policy withdrawal")
+        iso_date_value(item["effectiveAt"])
+        strict_bool(item["requiresAcceptance"], "invalid requiresAcceptance")
+        bounded_int(item["withdrawalDays"], 0, 30, "invalid policy withdrawal")
 
 
 def validate_request(c: Contracts, value: Any) -> None:
@@ -440,7 +249,10 @@ def validate_request(c: Contracts, value: Any) -> None:
         },
         {"policyRef", "licenseRef"},
     )
-    if value["$schema"] != SCHEMA_URI or value["schema"] != "wellmanifest.legal-lifecycle-request/v1":
+    if (
+        value["$schema"] != SCHEMA_URI
+        or value["schema"] != "wellmanifest.legal-lifecycle-request/v1"
+    ):
         raise ContractError("unsupported request")
     c.ref("identifier", value["requestId"])
     if value["operation"] not in {
@@ -452,7 +264,14 @@ def validate_request(c: Contracts, value: Any) -> None:
         "check_availability",
     }:
         raise ContractError("unsupported operation")
-    for name in ("accountRef", "productRef", "packRef", "jurisdictionRef", "intentRef", "grantRef"):
+    for name in (
+        "accountRef",
+        "productRef",
+        "packRef",
+        "jurisdictionRef",
+        "intentRef",
+        "grantRef",
+    ):
         c.ref(name, value[name])
     c.ref("sha256", value["planHash"])
     if value["operation"] == "accept_policy":
@@ -463,7 +282,9 @@ def validate_request(c: Contracts, value: Any) -> None:
         if "licenseRef" not in value:
             raise ContractError("grant_license lacks license")
         c.ref("licenseRef", value["licenseRef"])
-    if value["operation"] == "check_availability" and ("policyRef" in value or "licenseRef" in value):
+    if value["operation"] == "check_availability" and (
+        "policyRef" in value or "licenseRef" in value
+    ):
         raise ContractError("availability check cannot grant")
 
 
@@ -485,22 +306,36 @@ def validate_obligation(c: Contracts, value: Any) -> None:
             "grantedLicenses",
         },
     )
-    if value["$schema"] != SCHEMA_URI or value["schema"] != "wellmanifest.legal-obligation-state/v1":
+    if (
+        value["$schema"] != SCHEMA_URI
+        or value["schema"] != "wellmanifest.legal-obligation-state/v1"
+    ):
         raise ContractError("unsupported obligation")
-    for name in ("accountRef", "productRef", "packRef", "jurisdictionRef"):
-        c.ref(name if name != "jurisdictionRef" else "jurisdictionRef", value[name if name != "jurisdictionRef" else "boundJurisdictionRef"])
+    c.ref("accountRef", value["accountRef"])
+    c.ref("productRef", value["productRef"])
+    c.ref("packRef", value["packRef"])
+    c.ref("jurisdictionRef", value["boundJurisdictionRef"])
     time_value(value["updatedAt"])
-    if value["state"] not in {"unbound", "bound", "accepted", "restricted", "withdrawn", "expired", "denied"}:
+    if value["state"] not in {
+        "unbound",
+        "bound",
+        "accepted",
+        "restricted",
+        "withdrawn",
+        "expired",
+        "denied",
+    }:
         raise ContractError("invalid obligation state")
-    if not isinstance(value["version"], int) or value["version"] < 1:
-        raise ContractError("invalid version")
-    if value["state"] == "accepted" and not value["acceptedPolicies"]:
+    bounded_int(value["version"], 1, 2_147_483_647, "invalid version")
+    policies = unique_list(value["acceptedPolicies"], "invalid acceptedPolicies", maximum=16)
+    licenses = unique_list(value["grantedLicenses"], "invalid grantedLicenses", maximum=16)
+    if value["state"] == "accepted" and not policies:
         raise ContractError("accepted obligation lacks policy")
-    for ref in value["acceptedPolicies"]:
+    for ref in policies:
         c.ref("policyRef", ref)
-    for ref in value["grantedLicenses"]:
+    for ref in licenses:
         c.ref("licenseRef", ref)
-    if value["state"] == "unbound" and (value["acceptedPolicies"] or value["grantedLicenses"]):
+    if value["state"] == "unbound" and (policies or licenses):
         raise ContractError("unbound obligation has grants")
 
 
@@ -526,81 +361,70 @@ def validate_receipt(c: Contracts, value: Any) -> None:
             "personalDataStored",
         },
     )
-    if value["$schema"] != SCHEMA_URI or value["schema"] != "wellmanifest.legal-lifecycle-receipt/v1":
+    if (
+        value["$schema"] != SCHEMA_URI
+        or value["schema"] != "wellmanifest.legal-lifecycle-receipt/v1"
+    ):
         raise ContractError("unsupported receipt")
     c.ref("identifier", value["requestId"])
     for name in ("accountRef", "productRef", "packRef", "jurisdictionRef"):
         c.ref(name, value[name])
     c.ref("sha256", value["inputHash"])
     c.ref("sha256", value["planHash"])
+    if value["outcome"] not in {
+        "denied",
+        "accepted",
+        "bound",
+        "withdrawn",
+        "unavailable",
+        "failed",
+    }:
+        raise ContractError("invalid outcome")
     if time_value(value["completedAt"]) < time_value(value["startedAt"]):
         raise ContractError("receipt chronology")
-    if not value["evidenceRefs"]:
-        raise ContractError("receipt lacks evidence")
-    for ref in value["evidenceRefs"]:
+    for ref in unique_list(value["evidenceRefs"], "invalid evidenceRefs", minimum=1, maximum=64):
         c.ref("evidenceRef", ref)
     if value["secretsRedacted"] is not True or value["personalDataStored"] is not False:
         raise ContractError("unsafe receipt")
+
+
+def validate_document(value: Any) -> None:
+    if not isinstance(value, dict):
+        raise ContractError("expected object")
+    c = Contracts()
+    c.integrity()
+    dispatch = {
+        "wellmanifest.legal-pack/v1": validate_pack,
+        "wellmanifest.legal-lifecycle-request/v1": validate_request,
+        "wellmanifest.legal-obligation-state/v1": validate_obligation,
+        "wellmanifest.legal-lifecycle-receipt/v1": validate_receipt,
+    }
+    validator = dispatch.get(value.get("schema"))
+    if validator is None:
+        raise ContractError("unsupported document schema")
+    validator(c, value)
 
 
 def run_all() -> dict[str, Any]:
     c = Contracts()
     c.integrity()
     validate_lifecycle_profile(c.schema)
-    pack, request, obligation, receipt = pack_example(), request_example(), obligation_example(), receipt_example()
-    validate_pack(c, pack)
-    validate_request(c, request)
-    validate_obligation(c, obligation)
-    validate_receipt(c, receipt)
-    cases = []
-    bad = copy.deepcopy(pack)
-    bad["jurisdictions"][0]["consumerWithdrawalDays"] = 7
-    cases.append(("eu-withdrawal-too-short", lambda: validate_pack(c, bad)))
-    bad = copy.deepcopy(pack)
-    bad["jurisdictions"][0]["requiresExplicitConsent"] = False
-    cases.append(("eu-implied-consent", lambda: validate_pack(c, bad)))
-    bad = copy.deepcopy(pack)
-    bad["defaultJurisdictionRef"] = "jurisdiction://example.test/missing/v1"
-    cases.append(("missing-default-jurisdiction", lambda: validate_pack(c, bad)))
-    bad = copy.deepcopy(pack)
-    bad["jurisdictions"][0]["productAvailability"] = "prohibited"
-    bad["jurisdictions"][0]["serviceAvailability"] = "prohibited"
-    bad["jurisdictions"][1]["productAvailability"] = "prohibited"
-    cases.append(("pack-without-offered-jurisdiction", lambda: validate_pack(c, bad)))
-    bad = copy.deepcopy(pack)
-    bad["licenses"][0]["copyleft"] = "strong"
-    cases.append(("copyleft-without-disclosure", lambda: validate_pack(c, bad)))
-    bad = copy.deepcopy(request)
-    bad["email"] = "user@example.test"
-    cases.append(("personal-email", lambda: validate_request(c, bad)))
-    bad = copy.deepcopy(request)
-    bad["legalAdvice"] = "you should sue"
-    cases.append(("inline-legal-advice", lambda: validate_request(c, bad)))
-    bad = copy.deepcopy(request)
-    bad["operation"] = "accept_policy"
-    cases.append(("accept-without-policy", lambda: validate_request(c, bad)))
-    bad = copy.deepcopy(request)
-    bad["operation"] = "check_availability"
-    bad["licenseRef"] = "license://example.test/proprietary/v1"
-    cases.append(("availability-grants-license", lambda: validate_request(c, bad)))
-    bad = copy.deepcopy(obligation)
-    bad["state"] = "accepted"
-    bad["acceptedPolicies"] = []
-    cases.append(("accepted-without-policy", lambda: validate_obligation(c, bad)))
-    bad = copy.deepcopy(obligation)
-    bad["state"] = "unbound"
-    cases.append(("unbound-with-grants", lambda: validate_obligation(c, bad)))
-    bad = copy.deepcopy(receipt)
-    bad["personalDataStored"] = True
-    cases.append(("personal-data-receipt", lambda: validate_receipt(c, bad)))
-    bad = copy.deepcopy(receipt)
-    bad["courtFiling"] = "redacted"
-    cases.append(("court-filing-receipt", lambda: validate_receipt(c, bad)))
-    rejected = []
+    validate_pack(c, pack_example())
+    validate_request(c, request_example())
+    validate_obligation(c, obligation_example())
+    validate_receipt(c, receipt_example())
+    cases = _fx.build_adversarial_cases(
+        validate_pack_fn=lambda d: validate_pack(c, d),
+        validate_request_fn=lambda d: validate_request(c, d),
+        validate_obligation_fn=lambda d: validate_obligation(c, d),
+        validate_receipt_fn=lambda d: validate_receipt(c, d),
+        strict_loads_fn=strict_loads,
+    )
+    rejected: list[str] = []
     for name, case in cases:
         try:
             case()
-        except (ContractError, KeyError, TypeError):
+        except ContractError:
             rejected.append(name)
         else:
             raise AssertionError(f"adversarial case accepted: {name}")
@@ -609,18 +433,28 @@ def run_all() -> dict[str, Any]:
         "ok": True,
         "schemaDigest": "sha256:" + SCHEMA_DIGEST,
         "grammarDigest": "sha256:" + GRAMMAR_DIGEST,
+        "lifecycleSourceRevision": LIFECYCLE_SOURCE_REVISION,
         "positiveVariants": 4,
         "adversarialRejected": rejected,
     }
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--all", action="store_true")
-    args = parser.parse_args()
-    if not args.all:
-        parser.error("--all is required")
-    print(json.dumps(run_all(), indent=2, sort_keys=True))
+    parser.add_argument("--file", type=Path)
+    args = parser.parse_args(argv)
+    try:
+        if args.all:
+            print(json.dumps(run_all(), indent=2, sort_keys=True))
+        elif args.file:
+            validate_document(strict_loads(args.file.read_text("utf-8")))
+            print(f"PASS: {args.file}")
+        else:
+            parser.error("choose --all or --file")
+    except (ContractError, json.JSONDecodeError, OSError) as error:
+        print(f"FAIL: {error}")
+        return 1
     return 0
 
 
