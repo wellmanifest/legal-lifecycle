@@ -86,6 +86,65 @@ class LegalLifecycleHardeningTests(unittest.TestCase):
         with self.assertRaises(legal.ContractError):
             lp.reject_sensitive(nested)
 
+    def test_int_overflow_surrogates_secret_keys_ancestor_symlinks_and_ref_bounds(self) -> None:
+        for raw in (
+            '{"x": ' + "9" * 500 + "}",
+            '{"x": -' + "9" * 500 + "}",
+            '{"x": ' + "9" * 5000 + "}",
+            r'{"x": "\ud800"}',
+            r'{"\udfff": 1}',
+            '{"x": "\ud800"}',
+            "{malformed",
+        ):
+            with self.subTest(raw=raw[:24]), self.assertRaises(legal.ContractError):
+                legal.strict_loads(raw)
+
+        for bad_val in ({"x": 10**400}, {"x": "\ud800"}, {"\ud800": 1}):
+            with self.assertRaises(legal.ContractError):
+                legal.canonical(bad_val)
+
+        with self.assertRaises(legal.ContractError):
+            legal.digest("\ud800")
+
+        canary_key = "gh" + "p_" + ("X9y8Z7" * 5)
+        for bad_sensitive in ({canary_key: "v"}, {"\ud800": "v"}, {"safe": "\udfff"}):
+            with self.assertRaises(legal.ContractError):
+                lp.reject_sensitive(bad_sensitive)
+
+        for bad_ref in (
+            ("identifier", "a" * 97),
+            ("identifier", "pack-1\n"),
+            ("packRef", "pack://./saas/v1"),
+            ("packRef", "pack://../saas/v1"),
+            ("packRef", "pack://example.test/../v1"),
+            ("packRef", "pack://example.test/./v1"),
+            ("packRef", "pack://example.test/a::b/v1"),
+            ("packRef", "pack://example.test/a:..:b/v1"),
+            ("accountRef", "account://example.test/" + "a" * 250),
+        ):
+            with self.subTest(ref=bad_ref[1][:32]), self.assertRaises(legal.ContractError):
+                self.contracts.ref(bad_ref[0], bad_ref[1])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            real_dir = base / "real" / "nested"
+            real_dir.mkdir(parents=True)
+            doc_path = real_dir / "req.json"
+            doc_path.write_text(json.dumps(legal.request_example()), encoding="utf-8")
+
+            for bad_max in (0, -1, True, False):
+                with self.assertRaises(legal.ContractError):
+                    legal.read_regular_utf8(doc_path, max_bytes=bad_max)  # type: ignore[arg-type]
+
+            sym_dir = base / "sym_dir"
+            sym_dir.symlink_to(base / "real")
+            deep_sym = sym_dir / "nested" / "req.json"
+            with self.assertRaises(legal.ContractError):
+                legal.read_regular_utf8(deep_sym)
+            with self.assertRaises(legal.ContractError):
+                legal.file_digest(deep_sym)
+            self.assertEqual(legal.main(["--file", str(deep_sym)]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
