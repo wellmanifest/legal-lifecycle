@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -32,9 +33,11 @@ from legal_primitives import (  # noqa: E402
     bounded_list,
     canonical,
     digest,
+    enum_str,
     exact,
     file_digest,
     iso_date_value,
+    read_regular_utf8,
     reject_sensitive,
     strict_bool,
     strict_loads,
@@ -62,6 +65,7 @@ __all__ = [
     "main",
     "obligation_example",
     "pack_example",
+    "read_regular_utf8",
     "receipt_example",
     "request_example",
     "run_all",
@@ -74,6 +78,40 @@ __all__ = [
     "validate_receipt",
     "validate_request",
 ]
+
+_AVAILABILITY = {"offered", "restricted", "prohibited"}
+_ECONOMIC_AREAS = {"none", "eu", "eea", "uk", "other"}
+_ADEQUACY = {"adequate", "scc-required", "prohibited", "not-applicable"}
+_COPYLEFT = {"none", "weak", "strong", "network"}
+_DISCLOSURE = {"none", "on-distribution", "network"}
+_WARRANTY = {"none", "limited", "as-declared"}
+_POLICY_KINDS = {
+    "terms",
+    "privacy",
+    "refund",
+    "withdrawal",
+    "cookie",
+    "acceptable-use",
+    "dpa",
+}
+_OPERATIONS = {
+    "inspect",
+    "bind_jurisdiction",
+    "accept_policy",
+    "grant_license",
+    "withdraw",
+    "check_availability",
+}
+_OBLIGATION_STATES = {
+    "unbound",
+    "bound",
+    "accepted",
+    "restricted",
+    "withdrawn",
+    "expired",
+    "denied",
+}
+_OUTCOMES = {"denied", "accepted", "bound", "withdrawn", "unavailable", "failed"}
 
 
 def validate_jurisdiction(c: Contracts, value: Any) -> str:
@@ -97,7 +135,7 @@ def validate_jurisdiction(c: Contracts, value: Any) -> str:
     c.ref("country", value["country"])
     if "subdivision" in value and (
         not isinstance(value["subdivision"], str)
-        or not re.fullmatch(r"^[A-Z]{2}-[A-Z0-9]{1,3}$", value["subdivision"])
+        or not re.fullmatch(r"^[A-Z]{2}-[A-Z0-9]{1,3}\Z", value["subdivision"])
         or not value["subdivision"].startswith(value["country"] + "-")
     ):
         raise ContractError("invalid subdivision")
@@ -105,27 +143,18 @@ def validate_jurisdiction(c: Contracts, value: Any) -> str:
         value["applicableLaw"]
     ):
         raise ContractError("invalid applicableLaw")
-    if value["economicArea"] not in {"none", "eu", "eea", "uk", "other"}:
-        raise ContractError("invalid economic area")
-    if value["serviceAvailability"] not in {"offered", "restricted", "prohibited"}:
-        raise ContractError("invalid service availability")
-    if value["productAvailability"] not in {"offered", "restricted", "prohibited"}:
-        raise ContractError("invalid product availability")
+    area = enum_str(value["economicArea"], _ECONOMIC_AREAS, "invalid economic area")
+    enum_str(value["serviceAvailability"], _AVAILABILITY, "invalid service availability")
+    enum_str(value["productAvailability"], _AVAILABILITY, "invalid product availability")
     withdrawal = bounded_int(value["consumerWithdrawalDays"], 0, 30, "invalid withdrawal days")
     explicit = strict_bool(value["requiresExplicitConsent"], "invalid explicit consent flag")
-    if value["economicArea"] in {"eu", "eea"}:
+    if area in {"eu", "eea"}:
         if withdrawal < 14:
             raise ContractError("eu withdrawal window too short")
         if explicit is not True:
             raise ContractError("eu consent must be explicit")
     bounded_int(value["ageOfConsent"], 13, 21, "invalid age of consent")
-    if value["dataTransferAdequacy"] not in {
-        "adequate",
-        "scc-required",
-        "prohibited",
-        "not-applicable",
-    }:
-        raise ContractError("invalid transfer adequacy")
+    enum_str(value["dataTransferAdequacy"], _ADEQUACY, "invalid transfer adequacy")
     return ref
 
 
@@ -193,16 +222,13 @@ def validate_pack(c: Contracts, value: Any) -> None:
         if "spdxId" in item:
             c.ref("spdxId", item["spdxId"])
         grants = unique_list(item["grant"], "invalid license grant", minimum=1, maximum=8)
-        if any(g not in ALLOWED_GRANTS for g in grants):
+        if any(not isinstance(g, str) or g not in ALLOWED_GRANTS for g in grants):
             raise ContractError("invalid license grant")
         strict_bool(item["attributionRequired"], "invalid attributionRequired")
-        if item["copyleft"] not in {"none", "weak", "strong", "network"}:
-            raise ContractError("invalid copyleft")
-        if item["sourceDisclosure"] not in {"none", "on-distribution", "network"}:
-            raise ContractError("invalid source disclosure")
-        if item["warranty"] not in {"none", "limited", "as-declared"}:
-            raise ContractError("invalid warranty")
-        if item["copyleft"] in {"strong", "network"} and item["sourceDisclosure"] == "none":
+        copyleft = enum_str(item["copyleft"], _COPYLEFT, "invalid copyleft")
+        disclosure = enum_str(item["sourceDisclosure"], _DISCLOSURE, "invalid source disclosure")
+        enum_str(item["warranty"], _WARRANTY, "invalid warranty")
+        if copyleft in {"strong", "network"} and disclosure == "none":
             raise ContractError("copyleft without disclosure")
     policies: set[str] = set()
     for item in bounded_list(value["policies"], "invalid policies", minimum=1, maximum=16):
@@ -215,16 +241,7 @@ def validate_pack(c: Contracts, value: Any) -> None:
             raise ContractError("duplicate policy")
         policies.add(ref)
         c.ref("language", item["language"])
-        if item["kind"] not in {
-            "terms",
-            "privacy",
-            "refund",
-            "withdrawal",
-            "cookie",
-            "acceptable-use",
-            "dpa",
-        }:
-            raise ContractError("invalid policy kind")
+        enum_str(item["kind"], _POLICY_KINDS, "invalid policy kind")
         iso_date_value(item["effectiveAt"])
         strict_bool(item["requiresAcceptance"], "invalid requiresAcceptance")
         bounded_int(item["withdrawalDays"], 0, 30, "invalid policy withdrawal")
@@ -255,15 +272,7 @@ def validate_request(c: Contracts, value: Any) -> None:
     ):
         raise ContractError("unsupported request")
     c.ref("identifier", value["requestId"])
-    if value["operation"] not in {
-        "inspect",
-        "bind_jurisdiction",
-        "accept_policy",
-        "grant_license",
-        "withdraw",
-        "check_availability",
-    }:
-        raise ContractError("unsupported operation")
+    op = enum_str(value["operation"], _OPERATIONS, "unsupported operation")
     for name in (
         "accountRef",
         "productRef",
@@ -274,17 +283,15 @@ def validate_request(c: Contracts, value: Any) -> None:
     ):
         c.ref(name, value[name])
     c.ref("sha256", value["planHash"])
-    if value["operation"] == "accept_policy":
+    if op == "accept_policy":
         if "policyRef" not in value:
             raise ContractError("accept_policy lacks policy")
         c.ref("policyRef", value["policyRef"])
-    if value["operation"] == "grant_license":
+    if op == "grant_license":
         if "licenseRef" not in value:
             raise ContractError("grant_license lacks license")
         c.ref("licenseRef", value["licenseRef"])
-    if value["operation"] == "check_availability" and (
-        "policyRef" in value or "licenseRef" in value
-    ):
+    if op == "check_availability" and ("policyRef" in value or "licenseRef" in value):
         raise ContractError("availability check cannot grant")
 
 
@@ -316,26 +323,17 @@ def validate_obligation(c: Contracts, value: Any) -> None:
     c.ref("packRef", value["packRef"])
     c.ref("jurisdictionRef", value["boundJurisdictionRef"])
     time_value(value["updatedAt"])
-    if value["state"] not in {
-        "unbound",
-        "bound",
-        "accepted",
-        "restricted",
-        "withdrawn",
-        "expired",
-        "denied",
-    }:
-        raise ContractError("invalid obligation state")
+    state = enum_str(value["state"], _OBLIGATION_STATES, "invalid obligation state")
     bounded_int(value["version"], 1, 2_147_483_647, "invalid version")
     policies = unique_list(value["acceptedPolicies"], "invalid acceptedPolicies", maximum=16)
     licenses = unique_list(value["grantedLicenses"], "invalid grantedLicenses", maximum=16)
-    if value["state"] == "accepted" and not policies:
+    if state == "accepted" and not policies:
         raise ContractError("accepted obligation lacks policy")
     for ref in policies:
         c.ref("policyRef", ref)
     for ref in licenses:
         c.ref("licenseRef", ref)
-    if value["state"] == "unbound" and (policies or licenses):
+    if state == "unbound" and (policies or licenses):
         raise ContractError("unbound obligation has grants")
 
 
@@ -371,15 +369,7 @@ def validate_receipt(c: Contracts, value: Any) -> None:
         c.ref(name, value[name])
     c.ref("sha256", value["inputHash"])
     c.ref("sha256", value["planHash"])
-    if value["outcome"] not in {
-        "denied",
-        "accepted",
-        "bound",
-        "withdrawn",
-        "unavailable",
-        "failed",
-    }:
-        raise ContractError("invalid outcome")
+    enum_str(value["outcome"], _OUTCOMES, "invalid outcome")
     if time_value(value["completedAt"]) < time_value(value["startedAt"]):
         raise ContractError("receipt chronology")
     for ref in unique_list(value["evidenceRefs"], "invalid evidenceRefs", minimum=1, maximum=64):
@@ -391,6 +381,9 @@ def validate_receipt(c: Contracts, value: Any) -> None:
 def validate_document(value: Any) -> None:
     if not isinstance(value, dict):
         raise ContractError("expected object")
+    schema_id = value.get("schema")
+    if not isinstance(schema_id, str):
+        raise ContractError("unsupported document schema")
     c = Contracts()
     c.integrity()
     dispatch = {
@@ -399,7 +392,7 @@ def validate_document(value: Any) -> None:
         "wellmanifest.legal-obligation-state/v1": validate_obligation,
         "wellmanifest.legal-lifecycle-receipt/v1": validate_receipt,
     }
-    validator = dispatch.get(value.get("schema"))
+    validator = dispatch.get(schema_id)
     if validator is None:
         raise ContractError("unsupported document schema")
     validator(c, value)
@@ -448,7 +441,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.all:
             print(json.dumps(run_all(), indent=2, sort_keys=True))
         elif args.file:
-            validate_document(strict_loads(args.file.read_text("utf-8")))
+            target = Path(os.path.abspath(os.fspath(args.file)))
+            validate_document(strict_loads(read_regular_utf8(target)))
             print(f"PASS: {args.file}")
         else:
             parser.error("choose --all or --file")
